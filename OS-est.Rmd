@@ -657,8 +657,6 @@ h_OS <- ggplot(sim, aes(x = scaled_diff)) +
 
 h_OS
 
-
-
 ggsave("sim7.png", plot = h_OS)
 
 
