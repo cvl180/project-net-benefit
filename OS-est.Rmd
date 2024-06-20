@@ -1,0 +1,2072 @@
+---
+title: "OS-est"
+output:
+  pdf_document: default
+  html_document: default
+date: "2024-05-15"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(dplyr)
+library(data.table)
+library(tidyverse)
+library(mgcv)
+library(glmnet)
+library(caret)
+library(reshape2)
+library(survival)
+library(patchwork)
+library(grid)
+library(betareg)
+
+```
+
+# Collecting all
+
+Simulating data + setting beta, lambda0, delta
+```{r}
+
+set.seed(1023)
+
+beta <- log(2)
+lambda0 <- 1/50
+delta <- 5
+
+simulate_data <- function(n, beta, lambda0, P_A) {
+  A <- rbinom(n, 1, prob = P_A)
+  
+  # Simulate baseline survival times for control group
+  Y0_survival_times <- rexp(n, rate = lambda0)
+  Y1_survival_times <- rexp(n, rate = lambda0*exp(beta))
+  
+  # Adjust survival times based on the covariate A
+  survival_times <- ifelse(A == 0, Y0_survival_times, Y1_survival_times)
+  
+  status <- rep(1, n)
+  
+  # Return the dataset with A and Y (survival times)
+  return(data.frame(A = A, Y = survival_times, status))
+}
+
+
+
+
+simulate_data_new <- function(n, beta, lambda0, P_A, cov_effects) {
+  A <- rbinom(n, 1, prob = P_A)
+  
+  L1 <- rnorm(n)
+  L2 <- rbinom(n,1,prob = 0.7)
+  L3 <- rnorm(n, mean = 20, sd = 10)
+  L4 <- rexp(n, rate = 0.5)
+  covariates <- data.frame(L1, L2, L3, L4)
+  
+  #linear_predictor <- L1 * cov_effects[1] + L2 * cov_effects[2] + L3 * cov_effects[3] + L4 * cov_effects[4]
+  
+  #Y0_survival_times <- rexp(n, rate = lambda0*exp(L1 * cov_effects[1] + L2 * cov_effects[2] + L3 * cov_effects[3] + L4 * cov_effects[4]))
+  #Y1_survival_times <- rexp(n, rate = lambda0*exp(beta + L1 * cov_effects[1] + L2 * cov_effects[2] + L3 * cov_effects[3] + L4 * cov_effects[4]))
+
+  #survival_times <- ifelse(A == 0, Y0_survival_times, Y1_survival_times)
+  
+  survival_times <- rexp(n, rate = 1/(lambda0*exp(A*beta + L1 * cov_effects[1] + L2 * cov_effects[2] + L3 * cov_effects[3] + L4 * cov_effects[4])))
+  
+  
+  # Return the dataset with A and Y (survival times)
+  return(data.frame(A = A, Y = survival_times, L1 = L1, L2 = L2, L3 = L3, L4 = L4))
+}
+
+data_test <- simulate_data_new(100, 0, 1/50, 0.3, c(0.1,0.5,0.2,0.1))
+View(data_test)
+
+
+# Example usage
+simulated_data <- simulate_survival_data(1000, beta, lambda0)
+head(simulated_data)
+
+# Summarize the simulated data
+summary(simulated_data)
+
+# Plot survival times by treatment group
+library(ggplot2)
+ggplot(simulated_data, aes(x = as.factor(A), y = Y)) +
+  geom_boxplot() +
+  labs(x = "Treatment (A)", y = "Survival Time (Y)", title = "Survival Times by Treatment Group") +
+  theme_minimal()
+
+```
+
+
+
+# TRYING - USING THIS, tirsdag 
+```{r}
+
+simulate_data_new <- function(n, beta, lambda0, P_A, cov_effects) {
+  
+  A <- rbinom(n, 1, prob = P_A)
+  
+  L1 <- abs(rnorm(n))
+  L2 <- rbinom(n,1,prob = 0.7)
+  L3 <- rnorm(n, mean = 3, sd = 1)
+  L3 <- ifelse(L3 < 0, 0, L3) #ensuring non-neg
+  L4 <- rbinom(n,1,prob = 0.2)
+  L5 <- abs(rnorm(n))
+  L6 <- abs(rnorm(n))
+  L7 <- abs(rnorm(n))
+  L8 <- abs(rnorm(n))
+  covariates <- data.frame(L1, L2, L3, L4, L5, L6, L7, L8)
+  #covariates <- data.frame(L1, L2, L3, L4)
+  
+
+  #survival_times <- rnorm(n, mean = A*beta + L1 * cov_effects[1] + L2 * cov_effects[2] + L3 * cov_effects[3] + L4 * cov_effects[4], sd = 2 )
+  #survival_times <- rnorm(n, mean = 30, sd = 5)
+  
+  survival_times <- rexp(n, rate = lambda0*exp(A*beta + L1 * cov_effects[1] + L2 * cov_effects[2] + L3 * cov_effects[3] + L4 * cov_effects[4] + L5 * cov_effects[5] + L6 * cov_effects[6] + L7 * cov_effects[7] + L8 * cov_effects[8]))
+  #survival_times <- rexp(n, rate = lambda0*exp(A*beta + L1 * cov_effects[1] + L2 * cov_effects[2] + L3 * cov_effects[3] + L4 * cov_effects[4]))
+  
+  ID <- 1:n
+  
+  # Return the dataset with A and Y (survival times)
+  return(data.frame(ID = ID, A = A, Y = survival_times, L1 = L1, L2 = L2, L3 = L3, L4 = L4, L5 = L5, L6 = L6, L7 = L7, L8 = L8))
+}
+
+
+
+
+
+data1 <- simulate_data_simple(1000, beta = log(2), lambda0 = 1/10, P_A = 0.5, cov_effects = 4)
+View(data1)
+
+```
+
+
+
+Calculating true values
+```{r}
+
+## Calculating the truth 
+
+beta <- log(2)
+delta <- 5
+lambda0 <- 1/50
+true_value_0 <- exp(-delta * lambda0) / (1 + exp(-beta)) #P(Y0 > Y1 + delta)
+true_value_0
+
+true_value_1 <- exp(-lambda0*exp(beta)*delta)/(1+exp(beta))
+
+true_value = true_value_1 - true_value_0
+
+
+## Calculating true variance
+
+true_var <- function(beta, delta, lambda0, P_A, true_phi) {
+  
+  term_1 <- (1/P_A)*(exp(-2*lambda0*delta)/(1+2*exp(-beta)))
+  term_2 <- ((1/(1-P_A))*(1+exp(2*delta*lambda0*exp(beta))/(2*exp(beta)+1)-2*exp(lambda0*exp(beta)*delta)/(exp(beta)+1)))
+  term_3 <- 2*true_phi/P_A*exp(-lambda0*delta)/(1+exp(-beta))
+  term_4 <- 2*true_phi/(1-P_A)*(1-exp(lambda0*exp(beta)*delta)/(exp(beta)+1))
+  term_5 <- true_phi^2*(1/P_A+1/(1-P_A))
+  term_6 <- 1/(1-P_A)*exp(-2*lambda0*exp(beta)*delta)/(1+2*exp(beta))
+  term_7 <- -2*1/(1-P_A)*(exp(-lambda0*exp(beta)*delta)/(1+exp(beta))-1/(1+2*exp(beta)))
+  term_8 <- -2*true_phi*exp(-lambda0*exp(beta)*delta)/(1+exp(beta))
+  term_9 <- -2*1/P_A*(exp(beta)*exp(-lambda0*delta)/(1+exp(beta))-exp(beta)/(2+exp(beta)))
+  term_10 <- -2*true_phi*1/P_A*(1-exp(beta)*exp(lambda0*delta)/(1+exp(beta)))
+  term_11 <- 1/P_A*(1+exp(beta)*exp(2*lambda0*delta)/(2+exp(beta))-2*exp(beta)*exp(lambda0*delta)/(1+exp(beta)))
+  
+  true_var <- term_1 + term_2 + term_3 + term_4 + term_5 + term_6 + term_7 + term_8 + term_9 + term_10 + term_11
+  return(true_var)
+}
+
+true <- true_var(beta = 0, delta = 5, lambda0 = 1/50, P_A = 0.3, true_phi = 0)
+true
+
+```
+
+
+Survival functions
+```{r}
+survival_function_A0_0 <- function(data){
+  
+  survival_predictions <- numeric(nrow(data))
+  
+  subset_data <- subset(data, A == 0)
+  surv_obj <- Surv(time = subset_data$Y, event = subset_data$status)
+  fit <- survfit(surv_obj ~ 1)
+  
+  
+  survival_predictions <- sapply((data$Y + delta), function(y) {
+      if (y < min(fit$time)) {
+        return(1)
+      }
+      # Find the survival probability for the closest time point in the fit
+      valid_indices <- which(fit$time <= y)
+      idx <- valid_indices[which.min(abs(fit$time[valid_indices] - y))]
+      fit$surv[idx]
+    })
+  
+  return(survival_predictions)
+}
+
+
+
+survival_function_A1_0 <- function(data){
+  
+  survival_predictions <- numeric(nrow(data))
+  
+  subset_data <- subset(data, A == 1)
+  surv_obj <- Surv(time = subset_data$Y, event = subset_data$status)
+  fit <- survfit(surv_obj ~ 1)
+
+  
+  survival_predictions <- sapply((data$Y - delta), function(y) {
+      if (y < min(fit$time)) {
+        return(1)
+      }
+      # Find the survival probability for the closest time point in the fit
+      valid_indices <- which(fit$time <= y)
+      idx <- valid_indices[which.min(abs(fit$time[valid_indices] - y))]
+      fit$surv[idx]
+    })
+  return(survival_predictions)
+}
+
+
+
+survival_function_A0_1 <- function(data){
+  
+  survival_predictions <- numeric(nrow(data))
+  
+  subset_data <- subset(data, A == 0)
+  surv_obj <- Surv(time = subset_data$Y, event = subset_data$status)
+  fit <- survfit(surv_obj ~ 1)
+  
+  survival_predictions <- sapply((data$Y - delta), function(y) {
+      if (y < min(fit$time)) {
+        return(1)
+      }
+      # Find the survival probability for the closest time point in the fit
+      valid_indices <- which(fit$time <= y)
+      idx <- valid_indices[which.min(abs(fit$time[valid_indices] - y))]
+      fit$surv[idx]
+    })
+  
+  return(survival_predictions)
+}
+
+survival_function_A1_1 <- function(data){
+  
+  folds <- createFolds(data$A, k = 5, list = TRUE)
+  survival_predictions <- numeric(nrow(data))
+  
+  subset_data <- subset(data, A == 1)
+  surv_obj <- Surv(time = subset_data$Y, event = subset_data$status)
+  fit <- survfit(surv_obj ~ 1)
+  
+  survival_predictions <- sapply((data$Y + delta), function(y) {
+      # Find the survival probability for the closest time point in the fit
+      if (y < min(fit$time)) {
+        return(1)
+      }
+      # Find the survival probability for the closest time point in the fit
+      valid_indices <- which(fit$time <= y)
+      idx <- valid_indices[which.min(abs(fit$time[valid_indices] - y))]
+      fit$surv[idx]
+    })
+  
+  return(survival_predictions)
+}
+
+```
+
+
+Distribution functions - USING THIS
+```{r}
+dist_A0_minus <- function(data, delta){
+  
+  subset_data <- subset(data, A == 0)
+  
+  dist <- sapply((data$Y - delta), function(y) {
+    (1/nrow(subset_data))*sum(subset_data$Y <= y)
+  })
+  return(dist)
+}
+
+
+dist_A0_plus <- function(data, delta){
+  
+  subset_data <- subset(data, A == 0)
+  
+  dist <- sapply((data$Y + delta), function(y) {
+    (1/nrow(subset_data))*sum(subset_data$Y <= y)
+  })
+  return(dist)
+}
+
+
+dist_A1_minus <- function(data, delta){
+  
+  subset_data <- subset(data, A == 1)
+  
+  dist <- sapply((data$Y - delta), function(y) {
+    (1/nrow(subset_data))*sum(subset_data$Y <= y)
+  })
+  return(dist)
+}
+
+dist_A1_plus <- function(data, delta){
+  
+  subset_data <- subset(data, A == 1)
+  
+  dist <- sapply((data$Y + delta), function(y) {
+    (1/nrow(subset_data))*sum(subset_data$Y <= y)
+  })
+  return(dist)
+}
+
+
+```
+
+
+Obtaining estimates - using survival
+```{r}
+
+options(scipen = 1000)
+
+## when randomized trial, g_fct is equal to 2, always
+g_fct <- function(A, Aprob){
+  value <- (ifelse(A == 1, 1, 0)/Aprob + ifelse(A==0,1,0)/(1-Aprob))
+  return(value)
+}
+
+calculate_est <- function(data, P_A) {
+  
+  g_values <- numeric(nrow(data))
+  
+  for (i in 1:nrow(data)) {
+    g_values[i] <- g_fct(data$A[i], P_A)
+  }
+  
+  survival_values_A0 <- survival_function_A0_0(data)
+  distribution_values_A1 <- 1 - survival_function_A1_0(data)
+  
+  distribution_values_A0 <- 1 - survival_function_A0_1(data)
+  survival_values_A1 <- survival_function_A1_1(data)
+  
+  sum_values <- numeric(nrow(data))
+  
+  for (i in 1:nrow(data)) {
+    sum_values[i] <- ((ifelse(data$A[i]==0,1,0)/(1-P_A)*(survival_values_A1[i]) + (ifelse(data$A[i]==1,1,0)/P_A)*(distribution_values_A0[i])) - ((ifelse(data$A[i]==1,1,0)/P_A)*(survival_values_A0[i]) + (ifelse(data$A[i]==0,1,0)/(1-P_A))*(distribution_values_A1[i])))
+  }
+  
+  OS_est <- (1/sum(g_values))*sum(sum_values)
+  
+  #calculate variance
+  variance <- 1/(nrow(data))*mean((sum_values - g_values*OS_est)^2)
+  
+  CI <- c(OS_est - 1.96*sqrt(variance), OS_est + 1.96*sqrt(variance))
+  
+  
+  
+  ### Calculate U-est ###
+  Y_treated <- data %>% filter(A == 1) %>% pull(Y)
+  Y_untreated <- data %>% filter(A == 0) %>% pull(Y)
+  
+  sum1 <- 0
+  sum2 <- 0
+  
+  for (i in 1:length(Y_treated)) {
+      for (j in 1:length(Y_untreated)) {
+        
+        if (Y_treated[i] >= Y_untreated[j] + delta) {
+        sum1 <- sum1 + 1
+        }
+        if (Y_untreated[j] >= Y_treated[i] + delta) {
+        sum2 <- sum2 + 1
+        }
+      }
+  }
+  
+  U_est <- (1/(length(Y_treated)*length(Y_untreated)))*sum1 - (1/(length(Y_treated)*length(Y_untreated)))*sum2
+  
+  out <- list(OS_est = OS_est, OS_var = variance, CI_OS = CI, U_est = U_est)
+  return(out)
+}
+
+
+data1 <- simulate_survival_data(1000, beta, lambda0)
+data1
+
+all <- calculate_est(data1, 0.5)
+all
+all$CI_OS[2]
+
+```
+
+
+Obtaining estimates - using dist
+```{r}
+options(scipen = 1000)
+
+## when randomized trial, g_fct is equal to 2, always
+g_fct <- function(A, Aprob){
+  value <- (ifelse(A == 1, 1, 0)/Aprob + ifelse(A==0,1,0)/(1-Aprob))
+  return(value)
+}
+
+calculate_est <- function(data, delta) {
+  
+  P_Aest <- sum(data$A)/nrow(data)
+  
+  g_values <- numeric(nrow(data))
+  
+  for (i in 1:nrow(data)) {
+    g_values[i] <- g_fct(data$A[i], P_Aest)
+  }
+  
+  dist_A1_plus <- dist_A1_plus(data, delta)
+  dist_A0_minus <- dist_A0_minus(data, delta)
+  dist_A0_plus <- dist_A0_plus(data, delta)
+  dist_A1_minus <- dist_A1_minus(data, delta)
+  
+  sum_values <- numeric(nrow(data))
+
+  for (i in 1:nrow(data)) {
+    sum_values[i] <- ((ifelse(data$A[i]==0,1,0)/(1-P_Aest)*(1 - dist_A1_plus[i]) + (ifelse(data$A[i]==1,1,0)/P_Aest)*(dist_A0_minus[i])) - ((ifelse(data$A[i]==1,1,0)/P_Aest)*(1 - dist_A0_plus[i]) + (ifelse(data$A[i]==0,1,0)/(1-P_Aest))*(dist_A1_minus[i])))
+  }
+  
+  OS_est <- (1/sum(g_values))*sum(sum_values)
+  
+  #calculate variance
+  variance <- 1/(nrow(data))*mean((sum_values - g_values*OS_est)^2)
+  
+  CI <- c(OS_est - 1.96*sqrt(variance), OS_est + 1.96*sqrt(variance))
+  
+  
+  
+  ### Calculate U-est ###
+  Y_treated <- data %>% filter(A == 1) %>% pull(Y)
+  Y_untreated <- data %>% filter(A == 0) %>% pull(Y)
+  
+  sum1 <- 0
+  sum2 <- 0
+  
+  for (i in 1:length(Y_treated)) {
+      for (j in 1:length(Y_untreated)) {
+        
+        if (Y_treated[i] >= Y_untreated[j] + delta) {
+        sum1 <- sum1 + 1
+        }
+        if (Y_untreated[j] >= Y_treated[i] + delta) {
+        sum2 <- sum2 + 1
+        }
+      }
+  }
+  
+  U_est <- (1/(length(Y_treated)*length(Y_untreated)))*sum1 - (1/(length(Y_treated)*length(Y_untreated)))*sum2
+  
+  out <- list(OS_est = OS_est, OS_var = variance, CI_OS = CI, U_est = U_est)
+  return(out)
+}
+
+
+data1 <- simulate_survival_data(10000, beta, lambda0, 0.4)
+data1
+
+all <- calculate_est(data1, 5)
+all
+all$CI_OS[2]
+
+#var = 0.001138135
+#true lower bound = 1.00895, with n = 1000: 0.00100895
+
+```
+
+
+Run simulations
+```{r}
+
+run_simulation <- function(num_simulations, n, beta, lambda0, P_A, delta) {
+  OS_est <- numeric(num_simulations)
+  OS_var <- numeric(num_simulations)
+  U_est <- numeric(num_simulations)
+  count <- 0
+  
+  for (i in 1:num_simulations) {
+    data <- simulate_survival_data(n, beta, lambda0, P_A)
+    all <- calculate_est(data, delta)
+    OS_est[i] <- all$OS_est
+    U_est[i] <- all$U_est
+    OS_var[i] <- all$OS_var
+    
+    if (all$CI_OS[1] <= true_value && true_value <= all$CI_OS[2]) {
+      count <- count + 1
+    }
+    
+    print (i)
+  }
+  
+  OS_coverage <- count/num_simulations
+  
+  return(data.frame(OS_est, U_est, OS_coverage, OS_var))
+}
+
+simulation_results <- run_simulation(1000, 10000, log(2), 1/50, 0.3, 5)
+sim7 <- run_simulation(1000, 30, log(1), 1/50, 0.3, 5)
+
+
+
+
+### LOOK HERE ###
+
+sim1 <- read_csv("sim1.csv")
+sim2 <- read_csv("sim2.csv")
+sim3 <- read_csv("sim3.csv")
+sim5 <- read_csv("sim5.csv")
+sim6 <- read_csv("sim6.csv")
+sim7 <- read_csv("sim7.csv")
+
+View(sim5)
+
+
+h_OS <- ggplot(sim1, aes(x = scaled_diff)) +
+  geom_histogram(aes(y = ..density..), bins = 50, fill = "blue", color = "black", alpha = 0.7) +
+  geom_vline(aes(xintercept = 0), color = "green", linetype = "dashed", size = 1) +
+  geom_vline(aes(xintercept = mean(scaled_diff)), color = "red", linetype = "dashed", size = 1) +
+  stat_function(fun = function(x) dnorm(x, mean = 0, sd = sqrt(true_var)), color = "green", size = 1) +
+  geom_density(color = "red", size = 1) +
+  labs(title = "",
+       x = expression(sqrt(n) * (Estimate - True)),
+       y = "Density") +
+  theme_minimal() +
+  annotation_custom(
+    grob = textGrob("Some information:\n- Info 1\n- Info 2\n- Info 3", 
+                    x = unit(0.75, "npc"), 
+                    y = unit(0.9, "npc"),
+                    just = c("left", "top"),
+                    gp = gpar(col = "black", fontsize = 10, fontface = "italic"))
+  )
+
+
+
+h_OS <- ggplot(sim1, aes(x = scaled_diff)) +
+  geom_histogram(aes(y = ..density..), bins = 50, fill = "blue", color = "black", alpha = 0.7) +
+  geom_vline(aes(xintercept = 0), color = "green", linetype = "dashed", size = 1) +
+  geom_vline(aes(xintercept = mean(scaled_diff)), color = "red", linetype = "dashed", size = 1) +
+  stat_function(fun = function(x) dnorm(x, mean = 0, sd = sqrt(true_var)), color = "green", size = 1) +
+  geom_density(color = "red", size = 1) +
+  labs(title = "",
+      x = expression(sqrt(n) (Estimate - True)),
+       y = "Frequency") +
+  theme_minimal()
+
+ggsave("sim5.png", plot = h_OS)
+
+
+########
+
+
+
+
+
+
+#### DONT USE
+
+#without coverage
+h_OS <- ggplot(sim1, aes(x = scaled_diff)) +
+  geom_histogram(bins = 50, fill = "blue", color = "black", alpha = 0.7) +
+  geom_vline(aes(xintercept = 0), color = "green", linetype = "dashed", size = 1) +
+  geom_vline(aes(xintercept = mean(sim1$scaled_diff)), color = "red", linetype = "dashed", size = 1) +
+  stat_function(fun = dnorm, args = list(mean = 0, sd = sqrt(2)), color = "green", size = 1) +
+  labs(title = "",
+       x = "",
+       y = "Frequency") +
+  theme_minimal()
+
+h_OS <- ggplot(sim1, aes(x = scaled_diff)) +
+  geom_histogram(aes(y = ..density..), bins = 50, fill = "blue", color = "black", alpha = 0.7) +
+  geom_vline(aes(xintercept = 0), color = "green", linetype = "dashed", size = 1) +
+  geom_vline(aes(xintercept = mean(scaled_diff)), color = "red", linetype = "dashed", size = 1) +
+  
+  labs(title = "",
+       x = "",
+       y = "Density") +
+  theme_minimal()
+
+```
+
+sim1: run_simulation(1000, 10000, log(2), 1/50, 0.3, 5)
+sim2: run_simulation(1000, 500, log(2), 1/50, 0.3, 5)
+sim3: run_simulation(1000, 30, log(2), 1/50, 0.3, 5)
+
+sim5: run_simulation(1000, 10000, log(1), 1/50, 0.3, 5)
+sim6: run_simulation(1000, 500, log(1), 1/50, 0.3, 5)
+sim7: run_simulation(1000, 30, log(1), 1/50, 0.3, 5)
+
+
+CREATING PLOT
+```{r}
+View(sim)
+sim <- sim7
+
+mean(sim$OS_var)
+
+
+true_value <- 0
+true_var <- 1.603347
+true_sd <- sqrt(true_var)
+
+sd(sim$scaled_diff) #var
+
+mean(sim$OS_est) - true_value # bias
+mean((sim$OS_est - true_value)^2) # MSE
+sim$OS_coverage[1] # coverage
+
+
+info_text <- textGrob(
+  "SD = 1.3021 \n \n Estimator:\n Bias = 0.00743 \n MSE = 0.05652 \n Coverage = 0.91", 
+  x = unit(0.75, "npc"), 
+  y = unit(0.9, "npc"),
+  just = c("left", "top"),
+  gp = gpar(col = "black", fontsize = 10, fontface = "italic")
+)
+
+info_box <- grobTree(
+  rectGrob(
+    x = unit(0.75, "npc") - unit(0.05, "npc"), 
+    y = unit(0.9, "npc") + unit(0.05, "npc"),
+    width = grobWidth(info_text) + unit(0.1, "npc"), #chaning the size of the box
+    height = grobHeight(info_text) + unit(0.15, "npc"),
+    just = c("left", "top"),
+    gp = gpar(fill = "white", col = "black")
+  ),
+  info_text
+)
+
+h_OS <- ggplot(sim, aes(x = scaled_diff)) +
+  geom_histogram(aes(y = ..density..), bins = 50, fill = "blue", color = "black", alpha = 0.7) +
+  geom_vline(aes(xintercept = 0), color = "green", linetype = "dashed", size = 1) +
+  geom_vline(aes(xintercept = mean(scaled_diff)), color = "red", linetype = "dashed", size = 1) +
+  stat_function(fun = function(x) dnorm(x, mean = 0, sd = sqrt(true_var)), color = "green", size = 1) +
+  geom_density(color = "red", size = 1) +
+  labs(title = "",
+       x = expression(sqrt(n) * (Estimate - True)),
+       y = "Density") +
+  theme_minimal() +
+  theme(axis.title.x = element_text(size = 14)) + #making text on x-axis bigger
+  annotation_custom(info_box)
+
+h_OS
+
+
+
+ggsave("sim7.png", plot = h_OS)
+
+
+
+sim <- sim5
+
+mean(sqrt(sim$OS_var*10000))
+
+sim$OS_var
+
+```
+
+
+
+
+## WITH COVARIATES
+
+WITHOUT CROSS FITTING
+```{r}
+options(scipen = 1000)
+
+transform_response <- function(y, epsilon = 1e-4) {
+  y <- ifelse(y == 0, epsilon, y)
+  y <- ifelse(y == 1, 1 - epsilon, y)
+  return(y)
+}
+
+g_fct <- function(A, Aprob){
+  value <- (ifelse(A == 1, 1, 0)/Aprob + ifelse(A==0,1,0)/(1-Aprob))
+  return(value)
+}
+
+
+calculate_est_new <- function(data, delta, P_A) {
+  
+  P_Aest <- P_A #sum(data$A)/nrow(data)
+  
+  g_values <- numeric(nrow(data))
+  
+  for (i in 1:nrow(data)) {
+    g_values[i] <- g_fct(data$A[i], P_Aest)
+  }
+  
+  #dist_A1_plus <- transform_response(dist_A1_plus(data, delta))
+  #dist_A0_minus <- transform_response(dist_A0_minus(data, delta))
+  #dist_A0_plus <- transform_response(dist_A0_plus(data, delta))
+  #dist_A1_minus <- transform_response(dist_A1_minus(data, delta))
+  
+  dist_A1_plus <- dist_A1_plus(data, delta)
+  dist_A0_minus <- dist_A0_minus(data, delta)
+  dist_A0_plus <- dist_A0_plus(data, delta)
+  dist_A1_minus <- dist_A1_minus(data, delta)
+  
+  ## Nuisance models ## MAYBE DO IT WITH CROSS FITTING
+  
+  data0 <- data
+  data0$A <- 0
+  data1 <- data
+  data1$A <- 1
+  
+  #model1 <- betareg(dist_A0_plus ~ L1 + L2 + L3 + L4, data = data)
+  #model2 <- betareg(dist_A1_minus ~ L1 + L2 + L3 + L4, data = data)
+  #model3 <- betareg(dist_A1_plus ~ L1 + L2 + L3 + L4, data = data)
+  #model4 <- betareg(dist_A0_minus ~ L1 + L2 + L3 + L4, data = data)
+  
+  model1 <- glm(dist_A0_plus ~ L1 + L2 + L3 + L4, family = quasibinomial, data = data)
+  model2 <- glm(dist_A1_minus ~ L1 + L2 + L3 + L4, family = quasibinomial, data = data)
+  model3 <- glm(dist_A1_plus ~ L1 + L2 + L3 + L4, family = quasibinomial, data = data)
+  model4 <- glm(dist_A0_minus ~ L1 + L2 + L3 + L4, family = quasibinomial, data = data)
+  
+  E_dist_A0_plus <- predict(model1, newdata = data1, type = "response")
+  E_dist_A1_minus <- predict(model2, newdata = data0, type = "response")
+  E_dist_A1_plus <- predict(model3, newdata = data0, type = "response")
+  E_dist_A0_minus <- predict(model4, newdata = data1, type = "response")
+  
+  #E_dist_A0_plus <- dist_A0_plus
+  #E_dist_A1_minus <- dist_A1_minus
+  #E_dist_A1_plus <- dist_A1_plus
+  #E_dist_A0_minus <- dist_A0_minus
+  
+  ####
+  
+  ### non ###
+  
+  sum_values_non <- numeric(nrow(data))
+
+  for (i in 1:nrow(data)) {
+    sum_values_non[i] <- ((ifelse(data$A[i]==0,1,0)/(1-P_Aest)*(1 - dist_A1_plus[i]) + (ifelse(data$A[i]==1,1,0)/P_Aest)*(dist_A0_minus[i])) - ((ifelse(data$A[i]==1,1,0)/P_Aest)*(1 - dist_A0_plus[i]) + (ifelse(data$A[i]==0,1,0)/(1-P_Aest))*(dist_A1_minus[i])))
+  }
+  
+  OS_est_non <- (1/sum(g_values))*sum(sum_values_non)
+  
+  #calculate variance
+  variance_non <- 1/(nrow(data))*mean((sum_values_non - g_values*OS_est_non)^2)
+  
+  CI_non <- c(OS_est_non - 1.96*sqrt(variance_non), OS_est_non + 1.96*sqrt(variance_non))
+  
+  ####
+  
+  ### semi ###
+  
+  sum_values_semi <- numeric(nrow(data))
+  
+  for (i in 1:nrow(data)) {
+    sum_values_semi[i] <- -1*((data$A[i])/(P_Aest)*(dist_A0_plus[i]) - ((data$A[i]-P_Aest)/P_Aest)*(E_dist_A0_plus[i]) 
+    - ((1-data$A[i])/(1-P_Aest))*(dist_A1_minus[i]) + ((P_Aest - data$A[i])/(1-P_Aest))*(E_dist_A1_minus[i])
+    - ((1-data$A[i])/(1-P_Aest))*dist_A1_plus[i] + ((P_Aest-data$A[i])/(1-P_Aest))*E_dist_A1_plus[i]
+    + (data$A[i]/P_Aest)*dist_A0_minus[i] - ((data$A[i]-P_Aest)/P_Aest)*E_dist_A0_minus[i])
+  }
+  
+  OS_est_semi <- (1/(2*nrow(data)))*sum(sum_values_semi)
+  
+  #calculate variance
+  variance_semi <- 1/(nrow(data))*mean((-1*sum_values_semi + 2*OS_est_semi)^2)
+
+  CI_semi <- c(OS_est_semi - 1.96*sqrt(variance_semi), OS_est_semi + 1.96*sqrt(variance_semi))
+  
+  #####
+  
+  out <- list(OS_est_non = OS_est_non, OS_var_non = variance_non, CI_OS_non = CI_non, OS_est_semi = OS_est_semi, OS_var_semi = variance_semi, CI_OS_semi = CI_semi)
+  return(out)
+}
+
+data1 <- simulate_data_new(1000, beta = 0, 1/20, 0.5, c(1,2,0.5,3))
+View(data1)
+
+est <- calculate_est_new(data1, 5, 0.5)
+est
+
+
+
+# RUN SIMULATIONS
+
+true_value <- 0
+
+run_simulation_new <- function(num_simulations, n, beta, lambda0, P_A, delta, cov_effects) {
+  
+  OS_est_non <- numeric(num_simulations)
+  OS_var_non <- numeric(num_simulations)
+  OS_est_semi <- numeric(num_simulations)
+  OS_var_semi <- numeric(num_simulations)
+  
+
+  count1 <- 0
+  count2 <- 0
+  
+  for (i in 1:num_simulations) {
+    data <- simulate_data_new(n, beta, lambda0, P_A, cov_effects)
+    all <- calculate_est_new(data, delta, P_A)
+    OS_est_non[i] <- all$OS_est_non
+    OS_var_non[i] <- all$OS_var_non
+    OS_est_semi[i] <- all$OS_est_semi
+    OS_var_semi[i] <- all$OS_var_semi
+    
+    if (all$CI_OS_non[1] <= true_value && true_value <= all$CI_OS_non[2]) {
+      count1 <- count1 + 1
+    }
+    if (all$CI_OS_semi[1] <= true_value && true_value <= all$CI_OS_semi[2]) {
+      count2 <- count2 + 1
+    }
+    
+    print (i)
+  }
+  
+  OS_coverage_non <- count1/num_simulations
+  OS_coverage_semi <- count2/num_simulations
+  
+  return(data.frame(OS_est_non, OS_coverage_non, OS_var_non, OS_est_semi, OS_coverage_semi, OS_var_semi))
+}
+
+sim1 <- run_simulation_new(1000, 500, beta = 0, lambda0 = 1/10, P_A = 0.4, delta = 10, c(1,2,2,3))
+sim2 <- run_simulation_new(1000, 2000, beta = 0, lambda0 = 1/10, P_A = 0.4, delta = 10, c(1,2,2,3))
+View(sim1)
+
+sim1$scaled_diff_non <- sqrt(500)*sim1$OS_est_non
+sim1$scaled_diff_semi <- sqrt(500)*sim1$OS_est_semi
+
+var(sim1$OS_est_non)
+var(sim1$OS_est_semi)
+
+View(sim1)
+
+mean(sim1$OS_var_non)
+mean(sim1$OS_var_semi)
+
+
+
+
+
+
+sim2$scaled_diff_non <- sqrt(500)*sim1$OS_est_non
+sim2$scaled_diff_semi <- sqrt(500)*sim1$OS_est_semi
+
+View(sim2)
+
+var(sim2$OS_est_non)
+mean(sim2$OS_var_non)
+
+
+var(sim2$OS_est_semi)
+mean(sim2$OS_var_semi)
+
+
+
+
+h_OS_non <- ggplot(sim1, aes(x = scaled_diff_non)) +
+  geom_histogram(aes(y = ..density..), bins = 50, fill = "blue", color = "black", alpha = 0.7) +
+  geom_vline(aes(xintercept = 0), color = "green", linetype = "dashed", size = 1) +
+  geom_vline(aes(xintercept = mean(scaled_diff_non)), color = "red", linetype = "dashed", size = 1) +
+  labs(title = "",
+       x = "",
+       y = "Density") +
+  theme_minimal()
+
+h_OS_semi <- ggplot(sim1, aes(x = scaled_diff_semi)) +
+  geom_histogram(aes(y = ..density..), bins = 50, fill = "blue", color = "black", alpha = 0.7) +
+  geom_vline(aes(xintercept = 0), color = "green", linetype = "dashed", size = 1) +
+  geom_vline(aes(xintercept = mean(scaled_diff_semi)), color = "red", linetype = "dashed", size = 1) +
+  labs(title = "",
+       x = "",
+       y = "Density") +
+  theme_minimal()
+
+h_OS_non
+
+```
+
+WITH CROSS FITTING FOR THE NUISANCE MODELS
+```{r}
+options(scipen = 1000)
+
+transform_response <- function(y, epsilon = 1e-4) {
+  y <- ifelse(y == 0, epsilon, y)
+  y <- ifelse(y == 1, 1 - epsilon, y)
+  return(y)
+}
+
+g_fct <- function(A, Aprob){
+  value <- (ifelse(A == 1, 1, 0)/Aprob + ifelse(A==0,1,0)/(1-Aprob))
+  return(value)
+}
+
+
+calculate_est_new <- function(data, delta, P_A, K) {
+  
+  P_Aest <- P_A #sum(data$A)/nrow(data)
+  
+  g_values <- numeric(nrow(data))
+  
+  for (i in 1:nrow(data)) {
+    g_values[i] <- g_fct(data$A[i], P_Aest)
+  }
+  
+  dist_A1_plus <- dist_A1_plus(data, delta)
+  dist_A0_minus <- dist_A0_minus(data, delta)
+  dist_A0_plus <- dist_A0_plus(data, delta)
+  dist_A1_minus <- dist_A1_minus(data, delta)
+  
+  data$dist_A1_plus <- dist_A1_plus
+  data$dist_A0_minus <- dist_A0_minus
+  data$dist_A0_plus <- dist_A0_plus
+  data$dist_A1_minus <- dist_A1_minus
+  
+  
+  
+  ## Nuisance models ##
+  
+  sum_values <- numeric(nrow(data))
+  
+  E_dist_A0_plus <- numeric(nrow(data))
+  E_dist_A1_minus <- numeric(nrow(data))
+  E_dist_A1_plus <- numeric(nrow(data))
+  E_dist_A0_minus <- numeric(nrow(data))
+  
+  folds <- createFolds(data$ID, k = K, list = TRUE)
+  
+  for(i in seq_along(folds)) {
+    train_indices <- unlist(folds[-i])
+    test_indices <- unlist(folds[i])
+    
+    train_data <- data[train_indices, ]
+    test_data <- data[test_indices, ]
+  
+    data0 <- test_data
+    data0$A <- 0
+    data1 <- test_data
+    data1$A <- 1
+  
+    model1 <- glm(dist_A0_plus ~ ., family = quasibinomial, data = subset(train_data, select = -c(ID, A, Y)))
+    model2 <- glm(dist_A1_minus ~ ., family = quasibinomial, data = subset(train_data, select = -c(ID, A, Y)))
+    model3 <- glm(dist_A1_plus ~ ., family = quasibinomial, data = subset(train_data, select = -c(ID, A, Y)))
+    model4 <- glm(dist_A0_minus ~ ., family = quasibinomial, data = subset(train_data, select = -c(ID, A, Y)))
+  
+    E_dist_A0_plus[test_indices] <- predict(model1, newdata = data1, type = "response")
+    E_dist_A1_minus[test_indices] <- predict(model2, newdata = data0, type = "response")
+    E_dist_A1_plus[test_indices] <- predict(model3, newdata = data0, type = "response")
+    E_dist_A0_minus[test_indices] <- predict(model4, newdata = data1, type = "response")
+  }
+  
+  ####
+  
+  ### non ###
+  
+  sum_values_non <- numeric(nrow(data))
+
+  for (i in 1:nrow(data)) {
+    sum_values_non[i] <- ((ifelse(data$A[i]==0,1,0)/(1-P_Aest)*(1 - dist_A1_plus[i]) + (ifelse(data$A[i]==1,1,0)/P_Aest)*(dist_A0_minus[i])) - ((ifelse(data$A[i]==1,1,0)/P_Aest)*(1 - dist_A0_plus[i]) + (ifelse(data$A[i]==0,1,0)/(1-P_Aest))*(dist_A1_minus[i])))
+  }
+  
+  OS_est_non <- (1/sum(g_values))*sum(sum_values_non)
+  
+  #calculate variance
+  variance_non <- 1/(nrow(data))*mean((sum_values_non - g_values*OS_est_non)^2)
+  
+  CI_non <- c(OS_est_non - 1.96*sqrt(variance_non), OS_est_non + 1.96*sqrt(variance_non))
+  
+  ####
+  
+  ### semi ###
+  
+  sum_values_semi <- numeric(nrow(data))
+  
+  for (i in 1:nrow(data)) {
+    sum_values_semi[i] <- -1*((data$A[i])/(P_Aest)*(dist_A0_plus[i]) - ((data$A[i]-P_Aest)/P_Aest)*(E_dist_A0_plus[i]) 
+    - ((1-data$A[i])/(1-P_Aest))*(dist_A1_minus[i]) + ((P_Aest - data$A[i])/(1-P_Aest))*(E_dist_A1_minus[i])
+    - ((1-data$A[i])/(1-P_Aest))*dist_A1_plus[i] + ((P_Aest-data$A[i])/(1-P_Aest))*E_dist_A1_plus[i]
+    + (data$A[i]/P_Aest)*dist_A0_minus[i] - ((data$A[i]-P_Aest)/P_Aest)*E_dist_A0_minus[i])
+  }
+  
+  OS_est_semi <- (1/(2*nrow(data)))*sum(sum_values_semi)
+  
+  #calculate variance
+  variance_semi <- 1/(nrow(data))*mean((-1*sum_values_semi + 2*OS_est_semi)^2)
+
+  CI_semi <- c(OS_est_semi - 1.96*sqrt(variance_semi), OS_est_semi + 1.96*sqrt(variance_semi))
+  
+  #####
+  
+  out <- list(OS_est_non = OS_est_non, OS_var_non = variance_non, CI_OS_non = CI_non, OS_est_semi = OS_est_semi, OS_var_semi = variance_semi, CI_OS_semi = CI_semi)
+  return(out)
+}
+
+data1 <- simulate_data_new(1000, beta = 0, 1/100,0.4, c(0.2, 0.1, 0.8,1,0.5,0.3, 0.8, 0.2))
+View(data1)
+
+est <- calculate_est_new(data1, 5, 0.5, K = 5)
+est
+
+
+
+# RUN SIMULATIONS
+
+true_value <- 0
+
+run_simulation_new <- function(num_simulations, n, beta, lambda0, P_A, delta, cov_effects, K) {
+  
+  OS_est_non <- numeric(num_simulations)
+  OS_var_non <- numeric(num_simulations)
+  OS_est_semi <- numeric(num_simulations)
+  OS_var_semi <- numeric(num_simulations)
+  
+
+  count1 <- 0
+  count2 <- 0
+  
+  for (i in 1:num_simulations) {
+    data <- simulate_data_new(n, beta, lambda0, P_A, cov_effects)
+    all <- calculate_est_new(data, delta, P_A, K)
+    OS_est_non[i] <- all$OS_est_non
+    OS_var_non[i] <- all$OS_var_non
+    OS_est_semi[i] <- all$OS_est_semi
+    OS_var_semi[i] <- all$OS_var_semi
+    
+    if (all$CI_OS_non[1] <= true_value && true_value <= all$CI_OS_non[2]) {
+      count1 <- count1 + 1
+    }
+    if (all$CI_OS_semi[1] <= true_value && true_value <= all$CI_OS_semi[2]) {
+      count2 <- count2 + 1
+    }
+    
+    if (i %% 25 == 0) {
+    print(i)
+  }
+  }
+  
+  OS_coverage_non <- count1/num_simulations
+  OS_coverage_semi <- count2/num_simulations
+  
+  return(data.frame(OS_est_non, OS_coverage_non, OS_var_non, OS_est_semi, OS_coverage_semi, OS_var_semi))
+}
+
+sim1 <- run_simulation_new(1000, 1000, beta = 0, lambda0 = 1/100, P_A = 0.4, delta = 3, c(log(2),log(1),log(2),log(3)), K = 5)
+sim2 <- run_simulation_new(1000, 1000, beta = 0, lambda0 = 1/100, P_A = 0.4, delta = 3, c(1,2,2,3), K = 5) #okay
+sim3 <- run_simulation_new(1000, 1000, beta = 0, lambda0 = 1/50, P_A = 0.4, delta = 3, c(2,3,0.5,3), K = 5) #good
+sim4 <- run_simulation_new(1000, 1000, beta = 0, lambda0 = 1/100, P_A = 0.4, delta = 3, c(0.2, 0.1, 0.8,1,0.5,0.3, 0.8, 0.2), K = 5) #not so good
+sim5 <- run_simulation_new(1000, 1000, beta = 0, lambda0 = 1/100, P_A = 0.4, delta = 0.5, c(0.2, 0.1, 0.8,1,0.5,0.3, 0.8, 0.2), K = 5) #not so good
+sim6 <- run_simulation_new(1000, 1000, beta = 0, lambda0 = 1/50, P_A = 0.4, delta = 5, c(0.2, 0.1, 0.8,1,0.5,0.3, 0.8, 0.2), K = 5) #not so good
+sim7 <- run_simulation_new(1000, 1000, beta = 0, lambda0 = 1/50, P_A = 0.4, delta = 0.5, c(1, 2, 0.8,1,0.5,0.3, 2, 3), K = 5) #not so good
+sim8 <- run_simulation_new(1000, 1000, beta = 0, lambda0 = 1/50, P_A = 0.4, delta = 0.001, c(1, 2, 3,1), K = 5) #really good, bad coverage
+sim9 <- run_simulation_new(1000, 1000, beta = 0, lambda0 = 1/50, P_A = 0.4, delta = 1, c(1, 2, 3,1), K = 5) # a lot of warnings, okay, fine coverage
+sim10 <- run_simulation_new(1000, 1000, beta = 0, lambda0 = 1/100, P_A = 0.5, delta = 0.01, c(1, 2, 3,1), K = 5) #good, bad coverage
+sim11 <- run_simulation_new(1000, 1000, beta = 0, lambda0 = 1/100, P_A = 0.5, delta = 1, c(1, 0, 0.8,1,0,0.3, 2, 0), K = 5) #not so good
+sim12 <- run_simulation_new(1000, 1000, beta = 0, lambda0 = 1/50, P_A = 0.5, delta = 0.5, c(1, 0, 0.8,2,0,0.3, 2, 0.1), K = 5) #not so good
+sim13 <- run_simulation_new(1000, 1000, beta = 0, lambda0 = 1/100, P_A = 0.5, delta = 0.01, c(1, 2, 3,1,0,0, 0, 0), K = 5) #really good, bad coverage, 
+sim14 <- run_simulation_new(1000, 1000, beta = 0, lambda0 = 1/100, P_A = 0.5, delta = 0.01, c(1, 2, 3,1,1,2, 3, 1), K = 5) #okay, good coverage
+sim15 <- run_simulation_new(1000, 1000, beta = 2, lambda0 = 1/100, P_A = 0.5, delta = 0.01, c(1, 2, 3,1,0,0, 0, 0), K = 5) #WORNG BETA, wierd
+sim16 <- run_simulation_new(1000, 1000, beta = 0, lambda0 = 1/10, P_A = 0.3, delta = 0.1, c(0.3, 2, 3,1,0,0, 0, 0), K = 5) #good, okay coverage
+
+sim132 <- run_simulation_new(1000, n = 5000, beta = 0, lambda0 = 1/100, P_A = 0.5, delta = 0.01, c(1, 2, 3,1,0,0, 0, 0), K = 5) #higher n does not improve coverage
+
+
+#When bad coverage: also more difference between mean(var-est) and var(est), so probably bad variance-estimation
+
+data1 <- simulate_data_new(1000, beta = 0, 1/100,0.5, c(1, 0, 0.8,1,0,0.3, 2, 0))
+View(data1)
+
+
+sim2 <- run_simulation_new(1000, 2000, beta = 0, lambda0 = 1/10, P_A = 0.4, delta = 10, c(1,2,2,3))
+
+sim3 <- run_simulation_new(1000, n = 1000, beta = 0, lambda0 = 1/10, P_A = 0.4, delta = 10, c(1,2,2,3), K = 5)
+
+View(sim13)
+
+sim3$scaled_diff_non <- sqrt(500)*sim3$OS_est_non
+sim3$scaled_diff_semi <- sqrt(500)*sim3$OS_est_semi
+
+var(sim16$OS_est_non)
+var(sim16$OS_est_semi)
+var(sim10$OS_est_non)
+var(sim10$OS_est_semi)
+
+View(sim10)
+
+mean(sim3$OS_var_non)
+
+
+mean(sim13$OS_var_semi)
+var(sim13$OS_est_semi)
+
+mean(sim16$OS_var_semi)
+var(sim16$OS_est_semi)
+
+
+
+
+
+
+sim2$scaled_diff_non <- sqrt(500)*sim1$OS_est_non
+sim2$scaled_diff_semi <- sqrt(500)*sim1$OS_est_semi
+
+View(sim2)
+
+var(sim2$OS_est_non)
+mean(sim2$OS_var_non)
+
+
+var(sim2$OS_est_semi)
+mean(sim2$OS_var_semi)
+
+
+
+
+h_OS_non <- ggplot(sim1, aes(x = scaled_diff_non)) +
+  geom_histogram(aes(y = ..density..), bins = 50, fill = "blue", color = "black", alpha = 0.7) +
+  geom_vline(aes(xintercept = 0), color = "green", linetype = "dashed", size = 1) +
+  geom_vline(aes(xintercept = mean(scaled_diff_non)), color = "red", linetype = "dashed", size = 1) +
+  labs(title = "",
+       x = "",
+       y = "Density") +
+  theme_minimal()
+
+h_OS_semi <- ggplot(sim1, aes(x = scaled_diff_semi)) +
+  geom_histogram(aes(y = ..density..), bins = 50, fill = "blue", color = "black", alpha = 0.7) +
+  geom_vline(aes(xintercept = 0), color = "green", linetype = "dashed", size = 1) +
+  geom_vline(aes(xintercept = mean(scaled_diff_semi)), color = "red", linetype = "dashed", size = 1) +
+  labs(title = "",
+       x = "",
+       y = "Density") +
+  theme_minimal()
+
+h_OS_non
+
+```
+
+
+
+PLOTTING
+
+```{r}
+
+library(tidyr)
+sim_long <- gather(sim13, key = "variable", value = "value", OS_est_semi, OS_est_non)
+
+ggplot(sim_long, aes(x = value, fill = variable)) +
+  geom_histogram(aes(y = ..density..), position = "identity", alpha = 0.5, bins = 30) +
+  geom_density(alpha = 0.7) +
+  labs(title = "Histogram with Empirical Densities",
+       x = "Value",
+       y = "Density") +
+  theme_minimal()
+
+```
+
+
+
+SIMPLE, ONE BINARY COVARIAT
+```{r}
+
+
+simulate_data_simple <- function(n, beta, lambda0, P_A, cov_effects) {
+  
+  A <- rbinom(n, 1, prob = P_A)
+  
+  L1 <- rbinom(n,1,0.7)
+
+  survival_times <- rexp(n, rate = lambda0*exp(A*beta + L1 * cov_effects[1]))
+
+  ID <- 1:n
+  
+  # Return the dataset with A and Y (survival times)
+  return(data.frame(ID = ID, A = A, Y = survival_times, L1 = L1))
+}
+
+g_fct <- function(A, Aprob){
+  value <- (ifelse(A == 1, 1, 0)/Aprob + ifelse(A==0,1,0)/(1-Aprob))
+  return(value)
+}
+
+calculate_est_simple <- function(data, delta, P_A) {
+  
+  P_Aest <- P_A #sum(data$A)/nrow(data)
+  
+  g_values <- numeric(nrow(data))
+  
+  for (i in 1:nrow(data)) {
+    g_values[i] <- g_fct(data$A[i], P_Aest)
+  }
+  
+  data$dist_A1_plus <- dist_A1_plus(data, delta)
+  data$dist_A0_minus <- dist_A0_minus(data, delta)
+  data$dist_A0_plus <- dist_A0_plus(data, delta)
+  data$dist_A1_minus <- dist_A1_minus(data, delta)
+
+  E_dist_A0_plus <- numeric(nrow(data))
+  E_dist_A1_minus <- numeric(nrow(data))
+  E_dist_A1_plus <- numeric(nrow(data))
+  E_dist_A0_minus <- numeric(nrow(data))
+  
+  for (i in 1:nrow(data)) {
+    E_dist_A0_plus[i] <- mean(data$dist_A0_plus[data$L1 == data$L1[i] & data$A == 1])
+    E_dist_A1_minus[i] <- mean(data$dist_A1_minus[data$L1 == data$L1[i] & data$A == 0])
+    E_dist_A1_plus[i] <- mean(data$dist_A1_plus[data$L1 == data$L1[i] & data$A == 0])
+    E_dist_A0_minus[i] <- mean(data$dist_A0_minus[data$L1 == data$L1[i] & data$A == 1])
+  }
+  
+  ### non ###
+  
+  sum_values_non <- numeric(nrow(data))
+
+  for (i in 1:nrow(data)) {
+    sum_values_non[i] <- (((1-data$A[i])/(1-P_Aest)*(1 - data$dist_A1_plus[i]) + (data$A[i]/P_Aest)*(data$dist_A0_minus[i])) - (data$A[i]/P_Aest)*(1 - data$dist_A0_plus[i]) - ((1-data$A[i])/(1-P_Aest))*(data$dist_A1_minus[i]))
+  }
+  
+  OS_est_non <- (1/sum(g_values))*sum(sum_values_non)
+  
+  #calculate variance
+  variance_non <- 1/(nrow(data))*mean((sum_values_non - g_values*OS_est_non)^2)
+  
+  CI_non <- c(OS_est_non - 1.96*sqrt(variance_non), OS_est_non + 1.96*sqrt(variance_non))
+  
+  ####
+  
+  ### semi ###
+  
+  sum_values_semi <- numeric(nrow(data))
+  
+  for (i in 1:nrow(data)) {
+    sum_values_semi[i] <- - ((1-data$A[i])/(1-P_Aest))*data$dist_A1_plus[i] + ((P_Aest-data$A[i])/(1-P_Aest))*E_dist_A1_plus[i] + (data$A[i]/P_Aest)*data$dist_A0_minus[i] - ((data$A[i]-P_Aest)/P_Aest)*E_dist_A0_minus[i] + (data$A[i])/(P_Aest)*(data$dist_A0_plus[i]) - ((data$A[i]-P_Aest)/P_Aest)*(E_dist_A0_plus[i]) - ((1-data$A[i])/(1-P_Aest))*(data$dist_A1_minus[i]) + ((P_Aest - data$A[i])/(1-P_Aest))*(E_dist_A1_minus[i])
+  }
+  
+  OS_est_semi <- (1/(2*nrow(data)))*sum(sum_values_semi)
+  
+  #calculate variance
+  variance_semi <- 1/(nrow(data))*mean((sum_values_semi - 2*OS_est_semi)^2)
+
+  CI_semi <- c(OS_est_semi - 1.96*sqrt(variance_semi), OS_est_semi + 1.96*sqrt(variance_semi))
+  
+  #####
+  
+  out <- list(OS_est_non = OS_est_non, OS_var_non = variance_non, CI_OS_non = CI_non, OS_est_semi = OS_est_semi, OS_var_semi = variance_semi, CI_OS_semi = CI_semi)
+  return(out)
+}
+
+
+### Calculating true estimand ###
+
+true_estimand <- function(beta, lambda0, P_A, cov_effects, delta) {
+  
+  estimates <- numeric(10)
+  
+  for (k in 1:10){
+    data <- simulate_data_simple(n = 1000000, beta = beta, lambda0 = lambda0, P_A = P_A, cov_effects = cov_effects)
+    
+    Y_treated <- data %>% filter(A == 1) %>% pull(Y)
+    Y_untreated <- data %>% filter(A == 0) %>% pull(Y)
+  
+    sum1 <- 0
+    sum2 <- 0
+  
+    for (i in 1:length(Y_treated)) {
+      for (j in 1:length(Y_untreated)) {
+        
+        if (Y_treated[i] >= Y_untreated[j] + delta) {
+        sum1 <- sum1 + 1
+        }
+        if (Y_untreated[j] >= Y_treated[i] + delta) {
+        sum2 <- sum2 + 1
+        }
+      }
+    }
+  
+    estimates[k] <- (1/(as.numeric(length(Y_treated))*as.numeric(length(Y_untreated))))*sum1 - (1/(as.numeric(length(Y_treated))*as.numeric(length(Y_untreated))))*sum2
+    
+    print (k)
+  }
+  
+  return(mean(estimates))
+} #DONT USE
+
+
+true_estimand <- function(beta, lambda0, P_A, cov_effects, delta) {
+  
+  estimates <- numeric(10)
+  
+  for (k in 1:10) {
+    data <- simulate_data_simple(n = 500000, beta = beta, lambda0 = lambda0, P_A = P_A, cov_effects = cov_effects)
+    
+    Y_treated <- data %>% filter(A == 1) %>% pull(Y)
+    Y_untreated <- data %>% filter(A == 0) %>% pull(Y)
+    
+    n_treated <- length(Y_treated)
+    n_untreated <- length(Y_untreated)
+    
+    # Initialize counters
+    sum1 <- 0
+    sum2 <- 0
+    
+    # Efficient row-wise and column-wise comparison
+    for (i in 1:n_treated) {
+      sum1 <- sum1 + sum(Y_treated[i] >= Y_untreated + delta)
+      sum2 <- sum2 + sum(Y_untreated >= Y_treated[i] + delta)
+    }
+    
+    estimates[k] <- (sum1 - sum2) / (as.numeric(n_treated) * as.numeric(n_untreated))
+    
+    print(k)
+  }
+  
+  return(mean(estimates))
+} #USE THIS
+
+
+
+
+
+# RUN SIMULATIONS
+
+true_value <- 0
+
+true_value_1 <- true_estimand(beta = log(2), lambda0 = 1/50, P_A = 0.5, cov_effects = 3, delta = 3) #-0.1418927
+true_value_1 <- -0.1418927
+
+
+run_simulation_simple <- function(num_simulations, n, beta, lambda0, P_A, delta, cov_effects, true_value) {
+  
+  OS_est_non <- numeric(num_simulations)
+  OS_var_non <- numeric(num_simulations)
+  OS_est_semi <- numeric(num_simulations)
+  OS_var_semi <- numeric(num_simulations)
+
+  count1 <- 0
+  count2 <- 0
+  
+  for (i in 1:num_simulations) {
+    data <- simulate_data_simple(n, beta, lambda0, P_A, cov_effects)
+    all <- calculate_est_simple(data, delta, P_A)
+    OS_est_non[i] <- all$OS_est_non
+    OS_var_non[i] <- all$OS_var_non
+    OS_est_semi[i] <- all$OS_est_semi
+    OS_var_semi[i] <- all$OS_var_semi
+    
+    if (all$CI_OS_non[1] <= true_value && true_value <= all$CI_OS_non[2]) {
+      count1 <- count1 + 1
+    }
+    if (all$CI_OS_semi[1] <= true_value && true_value <= all$CI_OS_semi[2]) {
+      count2 <- count2 + 1
+    }
+    
+    if (i %% 25 == 0) {
+    print(i)
+  }
+  }
+  
+  OS_coverage_non <- count1/num_simulations
+  OS_coverage_semi <- count2/num_simulations
+  
+  return(data.frame(OS_est_non, OS_coverage_non, OS_var_non, OS_est_semi, OS_coverage_semi, OS_var_semi))
+}
+
+true_value_1 <- true_estimand(beta = log(2), lambda0 = 1/50, P_A = 0.5, cov_effects = 3, delta = 3) #-0.1418927
+true_value_1 <- -0.1418927
+
+
+sim12 <-  run_simulation_simple(1000, 50, beta = log(2), lambda0 = 1/50, P_A = 0.5, delta = 3, cov_effects = 3, true_value = true_value_1)
+View(sim12)
+
+
+data1 <- simulate_data_simple(50, log(2), 1/50, 0.5, 3)
+View(data1)
+
+
+
+sim_simple1 <- run_simulation_simple(500, 1000, beta = 0, lambda0 = 1/50, P_A = 0.5, delta = 3, cov_effects = 3, true_value = 0) #0.91 coverage
+sim_simple9 <- run_simulation_simple(500, 5000, beta = 0, lambda0 = 1/50, P_A = 0.5, delta = 3, cov_effects = 3, true_value = 0) #coverage 0.88
+sim_simple7 <- run_simulation_simple(500, 1000, beta = 0, lambda0 = 1/50, P_A = 0.5, delta = 3, cov_effects = 2, true_value = 0) #coverage 0.93, small difference in variance 
+sim_simple8 <- run_simulation_simple(500, 1000, beta = 0, lambda0 = 1/50, P_A = 0.5, delta = 5, cov_effects = 3, true_value = 0) #coverage 0.87
+
+
+
+
+sim_simple2 <- run_simulation_simple(1000, 3000, beta = 0, lambda0 = 1/50, P_A = 0.5, delta = 3, cov_effects = 5, true_value = 0) #bad coverage 0.75
+
+
+
+
+
+sim_simple3 <- run_simulation_simple(500, 1000, beta = log(2), lambda0 = 1/50, P_A = 0.5, delta = 3, cov_effects = 3, true_value = true_value_1) #0.9 coverage
+
+sim_simple4 <- run_simulation_simple(10000, 1000, beta = log(2), lambda0 = 1/50, P_A = 0.5, delta = 3, cov_effects = 3, true_value = true_value_1) #0.89 coverage
+
+sim_simple5 <- run_simulation_simple(500, 1000, beta = log(2), lambda0 = 1/50, P_A = 0.5, delta = 3, cov_effects = 3, true_value = true_value_1) #coverage 0.87, with no A=1 fx in E(F) in estimation procedure
+
+sim_simple6 <- run_simulation_simple(500, 5000, beta = log(2), lambda0 = 1/50, P_A = 0.5, delta = 3, cov_effects = 3, true_value = true_value_1) #coverage 0.89
+
+
+
+
+
+
+View(sim_simple9)
+
+
+var(sim_simple4$OS_est_semi)
+mean(sim_simple4$OS_var_semi)
+
+sim12$scaled_diff_non <- sqrt(50)*(sim12$OS_est_non-true_value_1)
+sim12$scaled_diff_semi <- sqrt(50)*(sim12$OS_est_semi-true_value_1)
+
+
+library(tidyr)
+sim_long <- gather(sim12, key = "variable", value = "value", scaled_diff_non, scaled_diff_semi) #EVT SCALED DIFF
+
+
+info_text <- textGrob(
+  "SD_non = 1.3021 \n \n Estimator:\n Bias = 0.00743 \n MSE = 0.05652 \n Coverage = 0.91", 
+  x = unit(0.75, "npc"), 
+  y = unit(0.9, "npc"),
+  just = c("left", "top"),
+  gp = gpar(col = "black", fontsize = 10, fontface = "italic")
+)
+
+info_box <- grobTree(
+  rectGrob(
+    x = unit(0.75, "npc") - unit(0.05, "npc"), 
+    y = unit(0.9, "npc") + unit(0.05, "npc"),
+    width = grobWidth(info_text) + unit(0.1, "npc"), #chaning the size of the box
+    height = grobHeight(info_text) + unit(0.15, "npc"),
+    just = c("left", "top"),
+    gp = gpar(fill = "white", col = "black")
+  ),
+  info_text
+)
+
+
+ggplot(sim_long, aes(x = value, fill = variable)) +
+  geom_histogram(aes(y = ..density..), position = "identity", alpha = 0.5, bins = 30) +
+  geom_density(alpha = 0.7) +
+  labs(title = "",
+       x = expression(sqrt(n) * (Estimate - True)),
+       y = "Density") +
+  theme_minimal() +
+  theme(axis.title.x = element_text(size = 14)) + #making text on x-axis bigger
+  annotation_custom(info_box)
+
+
+
+
+View(sim_simple4)
+
+```
+
+
+
+
+
+
+
+
+
+
+# psi_0
+
+with CF, dont use
+```{r}
+
+survival_function_A0_0 <- function(data){
+  
+  folds <- createFolds(data$A, k = 5, list = TRUE)
+  survival_predictions <- numeric(nrow(data))
+  
+  for(i in seq_along(folds)) {
+  train_indices <- unlist(folds[-i])
+  train_data <- data[train_indices, ]
+  
+  test_indices <- unlist(folds[i])
+  test_data <- data[test_indices, ]
+  
+  subset_data <- subset(train_data, A == 0)
+  surv_obj <- Surv(time = subset_data$Y, event = subset_data$status)
+  fit <- survfit(surv_obj ~ 1)
+  
+  #plot(fit, xlab = "Time", ylab = "Survival Probability", main = "Kaplan-Meier Estimate")
+  #surv_estimates <- summary(fit, times = test_data$Y)
+  #survival_predictions[test_indices] <- surv_estimates$surv
+  
+  survival_predictions[test_indices] <- sapply((test_data$Y + delta), function(y) {
+      # Find the survival probability for the closest time point in the fit
+      idx <- which.min(abs(fit$time - y))
+      fit$surv[idx]
+    })
+  }
+  return(survival_predictions)
+}
+```
+
+```{r}
+survival_function_A1_0 <- function(data){
+  
+  folds <- createFolds(data$A, k = 5, list = TRUE)
+  survival_predictions <- numeric(nrow(data))
+  
+  for(i in seq_along(folds)) {
+  train_indices <- unlist(folds[-i])
+  train_data <- data[train_indices, ]
+  
+  test_indices <- unlist(folds[i])
+  test_data <- data[test_indices, ]
+  
+  subset_data <- subset(train_data, A == 1)
+  surv_obj <- Surv(time = subset_data$Y, event = subset_data$status)
+  fit <- survfit(surv_obj ~ 1)
+  
+  #plot(fit, xlab = "Time", ylab = "Survival Probability", main = "Kaplan-Meier Estimate")
+  #surv_estimates <- summary(fit, times = test_data$Y)
+  #survival_predictions[test_indices] <- surv_estimates$surv
+  
+  survival_predictions[test_indices] <- sapply((test_data$Y - delta), function(y) {
+      # Find the survival probability for the closest time point in the fit
+      idx <- which.min(abs(fit$time - y))
+      fit$surv[idx]
+    })
+  }
+  return(survival_predictions)
+}
+```
+
+
+without CF, USE THESE
+```{r}
+survival_function_A0_0 <- function(data){
+  
+  survival_predictions <- numeric(nrow(data))
+  
+  subset_data <- subset(data, A == 0)
+  surv_obj <- Surv(time = subset_data$Y, event = subset_data$status)
+  fit <- survfit(surv_obj ~ 1)
+  
+  
+  survival_predictions <- sapply((data$Y + delta), function(y) {
+      if (y < min(fit$time)) {
+        return(1)
+      }
+      # Find the survival probability for the closest time point in the fit
+      valid_indices <- which(fit$time <= y)
+      idx <- valid_indices[which.min(abs(fit$time[valid_indices] - y))]
+      fit$surv[idx]
+    })
+  
+  return(survival_predictions)
+}
+
+
+
+survival_function_A1_0 <- function(data){
+  
+  survival_predictions <- numeric(nrow(data))
+  
+  subset_data <- subset(data, A == 1)
+  surv_obj <- Surv(time = subset_data$Y, event = subset_data$status)
+  fit <- survfit(surv_obj ~ 1)
+
+  
+  survival_predictions <- sapply((data$Y - delta), function(y) {
+      if (y < min(fit$time)) {
+        return(1)
+      }
+      # Find the survival probability for the closest time point in the fit
+      valid_indices <- which(fit$time <= y)
+      idx <- valid_indices[which.min(abs(fit$time[valid_indices] - y))]
+      fit$surv[idx]
+    })
+  return(survival_predictions)
+}
+
+
+#trying
+survival_function_A1_0(simulate_survival_data(10, beta, lambda0))
+
+data1 <- simulate_survival_data(100, beta, lambda0)
+min(data1$Y)
+
+survival_predictions <- numeric(nrow(data1))
+subset_data <- subset(data1, A == 1)
+surv_obj <- Surv(time = subset_data$Y, event = subset_data$status)
+fit <- survfit(surv_obj ~ 1)
+surv_obj
+fit$time
+
+valid_indices <- which(fit$time <= 50)
+valid_indices
+idx <- valid_indices[which.min(abs(fit$time[valid_indices] - 50))]
+idx
+fit$surv[idx]
+
+
+valid_indices <- which(fit$time <= y)
+
+```
+
+
+
+## OS-est
+```{r}
+
+options(scipen = 1000)
+
+## when randomized trial, g_fct is equal to 2, always
+g_fct <- function(A, Aprob){
+  value <- (ifelse(A == 1, 1, 0)/Aprob + ifelse(A==0,1,0)/(1-Aprob))
+  return(value)
+}
+
+
+calculate_OS_0 <- function(data, P_A) {
+  
+  g_values <- numeric(nrow(data))
+  
+  for (i in 1:nrow(data)) {
+    g_values[i] <- g_fct(data$A[i], P_A)
+  }
+  
+  survival_values_A0 <- survival_function_A0_0(data)
+  distribution_values_A1 <- 1 - survival_function_A1_0(data)
+  
+  sum_values <- numeric(nrow(data))
+  
+  for (i in 1:nrow(data)) {
+    sum_values[i] <- (ifelse(data$A[i]==1,1,0)/P_A)*(survival_values_A0[i]) + (ifelse(data$A[i]==0,1,0)/(1-P_A))*(distribution_values_A1[i])
+  }
+  
+  OS_est <- (1/sum(g_values))*sum(sum_values)
+  
+  #calculate variance
+  #variance <- 1/(nrow(data))*mean((sum_values - g_values*OS_est)^2)
+  variance <- 1/(nrow(data))*var(sum_values - g_values*OS_est)
+  
+  CI <- c(OS_est - 1.96*sqrt(variance), OS_est + 1.96*sqrt(variance))
+  
+  out <- list(OS_est, variance, CI)
+  
+  return(out)
+}
+
+OS <- calculate_OS_0(simulate_survival_data(1000, beta, lambda0), 0.5)
+OS
+
+1/10000*0.356398
+
+0.0000356398 #true
+0.00003261452 #from sim
+
+
+
+
+```
+
+
+Run the simulations
+```{r}
+
+run_simulation_0 <- function(num_simulations, n) {
+  est_OS <- numeric(num_simulations)
+  count <- 0
+  
+  for (i in 1:num_simulations) {
+    data <- simulate_survival_data(n, beta, lambda0)
+    all <- calculate_OS_0(data, 0.5)
+    est_OS[i] <- all[[1]]
+    
+    if (all[[3]][1] <= true_value_0 && true_value_0 <= all[[3]][2]) {
+      count <- count + 1
+    }
+   
+  }
+  
+  return(list(est_OS, count/num_simulations))
+}
+
+simulation_results <- run_simulation_0(1000, 1000)
+simulation_results
+
+coverage <- simulation_results[[2]]
+coverage
+
+var(simulation_results[[1]])
+
+OS_estimates_0 <- data.frame(OS_est = simulation_results[[1]])
+OS_estimates_0
+
+
+#without coverage
+ggplot(OS_estimates_0, aes(x = OS_est)) +
+  geom_histogram(binwidth = 0.002, fill = "blue", color = "black", alpha = 0.7) +
+  geom_vline(aes(xintercept = true_value_0), color = "green", size = 1) +
+  geom_vline(aes(xintercept = mean(OS_est)), color = "red", size = 1) +
+  labs(title = "Histogram of OS-estimates",
+       x = "OS-est",
+       y = "Frequency") +
+  theme_minimal()
+
+
+
+#with coverage
+ggplot(OS_estimates_0, aes(x = OS_est)) +
+  geom_histogram(binwidth = 0.002, fill = "blue", color = "black", alpha = 0.7) +
+  geom_vline(aes(xintercept = true_value_0), color = "red", linetype = "dashed", size = 1) +
+  labs(title = "Histogram of OS Estimates",
+       x = "OS Estimate",
+       y = "Frequency") +
+  annotate("text", x = min(OS_estimates_0$OS_est), y = Inf, hjust = 0, vjust = 2,
+           label = paste("Coverage Probability:", round(coverage, 3)),
+           size = 5, color = "black") +
+  theme_minimal()
+
+
+
+
+```
+
+
+
+
+
+# psi_1
+
+```{r}
+
+true_value_1 <- exp(-lambda0*exp(beta)*delta)/(1+exp(beta))
+
+survival_function_A0_1 <- function(data){
+  
+  survival_predictions <- numeric(nrow(data))
+  
+  
+  subset_data <- subset(data, A == 0)
+  surv_obj <- Surv(time = subset_data$Y, event = subset_data$status)
+  fit <- survfit(surv_obj ~ 1)
+  
+  survival_predictions <- sapply((test_data$Y - delta), function(y) {
+      if (y < min(fit$time)) {
+        return(1)
+      }
+      # Find the survival probability for the closest time point in the fit
+      valid_indices <- which(fit$time <= y)
+      idx <- valid_indices[which.min(abs(fit$time[valid_indices] - y))]
+      fit$surv[idx]
+    })
+  
+  return(survival_predictions)
+}
+
+survival_function_A1_1 <- function(data){
+  
+  folds <- createFolds(data$A, k = 5, list = TRUE)
+  survival_predictions <- numeric(nrow(data))
+  
+  subset_data <- subset(data, A == 1)
+  surv_obj <- Surv(time = subset_data$Y, event = subset_data$status)
+  fit <- survfit(surv_obj ~ 1)
+  
+  survival_predictions <- sapply((test_data$Y + delta), function(y) {
+      # Find the survival probability for the closest time point in the fit
+      if (y < min(fit$time)) {
+        return(1)
+      }
+      # Find the survival probability for the closest time point in the fit
+      valid_indices <- which(fit$time <= y)
+      idx <- valid_indices[which.min(abs(fit$time[valid_indices] - y))]
+      fit$surv[idx]
+    })
+  
+  return(survival_predictions)
+}
+
+
+
+calculate_OS_1 <- function(data, P_A) {
+  
+  g_values <- numeric(nrow(data))
+  
+  for (i in 1:nrow(data)) {
+    g_values[i] <- g_fct(data$A[i], P_A)
+  }
+  
+  distribution_values_A0 <- 1 - survival_function_A0_1(data)
+  survival_values_A1 <- survival_function_A1_1(data)
+  
+  sum_values <- numeric(nrow(data))
+  
+  for (i in 1:nrow(data)) {
+    sum_values[i] <- ifelse(data$A[i]==0,1,0)/(1-P_A)*(survival_values_A1[i]) + (ifelse(data$A[i]==1,1,0)/P_A)*(distribution_values_A0[i])
+  }
+  
+  OS_est <- (1/sum(g_values))*sum(sum_values)
+  
+  #calculate variance
+  variance <- 1/(nrow(data))*mean((sum_values - g_values*OS_est)^2)
+  
+  CI <- c(OS_est - 1.96*sqrt(variance), OS_est + 1.96*sqrt(variance))
+  
+  out <- list(OS_est, variance, CI)
+  
+  return(out)
+}
+
+
+```
+
+Run the simulations
+```{r}
+
+run_simulation_1 <- function(num_simulations, n) {
+  est_OS <- numeric(num_simulations)
+  count <- 0
+  
+  for (i in 1:num_simulations) {
+    data <- simulate_survival_data(n, beta, lambda0)
+    all <- calculate_OS_1(data, 0.5)
+    est_OS[i] <- all[[1]]
+    
+    if (all[[3]][1] <= true_value_1 && true_value_1 <= all[[3]][2]) {
+      count <- count + 1
+    }
+   
+  }
+  
+  return(list(est_OS, count/num_simulations))
+}
+
+simulation_results1 <- run_simulation_1(1000, 1000)
+simulation_results1
+
+coverage <- simulation_results1[[2]]
+coverage
+
+OS_estimates_1 <- data.frame(OS_est = simulation_results1[[1]])
+
+
+#without coverage
+ggplot(OS_estimates_1, aes(x = OS_est)) +
+  geom_histogram(binwidth = 0.002, fill = "blue", color = "black", alpha = 0.7) +
+  geom_vline(aes(xintercept = true_value_1), color = "red", linetype = "dashed", size = 1) +
+  labs(title = "Histogram of OS-estimates",
+       x = "OS-est",
+       y = "Frequency") +
+  theme_minimal()
+
+#with coverage
+ggplot(OS_estimates_1, aes(x = OS_est)) +
+  geom_histogram(binwidth = 0.002, fill = "blue", color = "black", alpha = 0.7) +
+  geom_vline(aes(xintercept = true_value_1), color = "red", linetype = "dashed", size = 1) +
+  labs(title = "Histogram of OS Estimates",
+       x = "OS Estimate",
+       y = "Frequency") +
+  annotate("text", x = min(OS_estimates_1$OS_est), y = Inf, hjust = 0, vjust = 2,
+           label = paste("Coverage Probability:", round(coverage, 3)),
+           size = 5, color = "black") +
+  theme_minimal()
+
+
+
+
+```
+
+
+
+
+
+# The difference: P(Y1 > Y0 + delta) - P(Y0 > Y1 + delta)
+```{r}
+
+true_value = true_value_1 - true_value_0
+true_value
+
+
+calculate_OS <- function(data, P_A) {
+  
+  g_values <- numeric(nrow(data))
+  
+  for (i in 1:nrow(data)) {
+    g_values[i] <- g_fct(data$A[i], P_A)
+  }
+  
+  survival_values_A0 <- survival_function_A0_0(data)
+  distribution_values_A1 <- 1 - survival_function_A1_0(data)
+  
+  distribution_values_A0 <- 1 - survival_function_A0_1(data)
+  survival_values_A1 <- survival_function_A1_1(data)
+  
+  sum_values <- numeric(nrow(data))
+  
+  for (i in 1:nrow(data)) {
+    sum_values[i] <- (ifelse(data$A[i]==0,1,0)/(1-P_A)*(survival_values_A1[i]) + (ifelse(data$A[i]==1,1,0)/P_A)*(distribution_values_A0[i])) -   ((ifelse(data$A[i]==1,1,0)/P_A)*(survival_values_A0[i]) + (ifelse(data$A[i]==0,1,0)/(1-P_A))*(distribution_values_A1[i]))
+  }
+  
+  OS_est <- (1/sum(g_values))*sum(sum_values)
+  
+  #calculate variance
+  variance <- 1/(nrow(data))*mean((sum_values - g_values*OS_est)^2)
+  
+  CI <- c(OS_est - 1.96*sqrt(variance), OS_est + 1.96*sqrt(variance))
+  
+  
+  
+  ### Calculate U-est ###
+    Y_treated <- data %>% filter(A == 1) %>% pull(Y)
+  Y_untreated <- data %>% filter(A == 0) %>% pull(Y)
+  
+  sum1 <- 0
+  sum2 <- 0
+  
+  for (i in 1:length(Y_treated)) {
+      for (j in 1:length(Y_untreated)) {
+        
+        if (Y_treated[i] >= Y_untreated[j] + delta) {
+        sum1 <- sum1 + 1
+        }
+        if (Y_untreated[j] >= Y_treated[i] + delta) {
+        sum2 <- sum2 + 1
+        }
+      }
+  }
+  
+  U_est <- (1/(length(Y_treated)*length(Y_untreated)))*sum1 - (1/(length(Y_treated)*length(Y_untreated)))*sum2
+  
+  out <- list(OS_est = OS_est, var_OS = variance, CI_OS = CI, U_est = U_est)
+  return(out)
+}
+
+
+
+run_simulation <- function(num_simulations, n, beta, lambda0, P_A) {
+  est_OS <- numeric(num_simulations)
+  count <- 0
+  
+  for (i in 1:num_simulations) {
+    data <- simulate_survival_data(n, beta, lambda0)
+    all <- calculate_OS(data, P_A)
+    est_OS[i] <- all[[1]]
+    
+    if (all[[3]][1] <= true_value && true_value <= all[[3]][2]) {
+      count <- count + 1
+    }
+   
+  }
+  
+  return(list(est_OS, count/num_simulations))
+}
+
+simulation_results <- run_simulation(100, 1000, log(2), 1/50, 0.5)
+simulation_results
+
+coverage <- simulation_results[[2]]
+coverage
+
+OS_estimates <- data.frame(OS_est = simulation_results[[1]])
+
+
+#without coverage
+h_OS <- ggplot(OS_estimates, aes(x = OS_est)) +
+  geom_histogram(binwidth = 0.002, fill = "blue", color = "black", alpha = 0.7) +
+  geom_vline(aes(xintercept = true_value), color = "red", linetype = "dashed", size = 1) +
+  labs(title = "Histogram of OS-estimates",
+       x = "OS-est",
+       y = "Frequency") +
+  theme_minimal()
+
+#with coverage
+ggplot(OS_estimates, aes(x = OS_est)) +
+  geom_histogram(binwidth = 0.002, fill = "blue", color = "black", alpha = 0.7) +
+  geom_vline(aes(xintercept = true_value), color = "red", linetype = "dashed", size = 1) +
+  labs(title = "Histogram of OS Estimates",
+       x = "OS Estimate",
+       y = "Frequency") +
+  annotate("text", x = min(OS_estimates$OS_est), y = Inf, hjust = 0, vjust = 2,
+           label = paste("Coverage Probability:", round(coverage, 3)),
+           size = 5, color = "black") +
+  theme_minimal()
+
+
+```
+
+
+## The U-statistic estimator
+```{r}
+
+U_est <- function(data) {
+  
+  Y_treated <- data %>% filter(A == 1) %>% pull(Y)
+  Y_untreated <- data %>% filter(A == 0) %>% pull(Y)
+  
+  sum1 <- 0
+  sum2 <- 0
+  
+  for (i in 1:length(Y_treated)) {
+      for (j in 1:length(Y_untreated)) {
+        
+        if (Y_treated[i] >= Y_untreated[j] + delta) {
+        sum1 <- sum1 + 1
+        }
+        if (Y_untreated[j] >= Y_treated[i] + delta) {
+        sum2 <- sum2 + 1
+        }
+      }
+  }
+  
+  U_est <- (1/(length(Y_treated)*length(Y_untreated)))*sum1 - (1/(length(Y_treated)*length(Y_untreated)))*sum2
+  
+  return(U_est)
+}
+
+est <- U_est(simulate_survival_data(1000, beta, lambda0))
+est
+
+
+
+
+
+run_simulation_U <- function(num_simulations, n) {
+  U_est <- numeric(num_simulations)
+  
+  for (i in 1:num_simulations) {
+    data <- simulate_survival_data(n, beta, lambda0)
+    U_est[i] <- U_est(data)
+   
+  }
+  
+  return(U_est)
+}
+
+simulation_results_U <- run_simulation_U(1000, 1000)
+
+U_estimates <- data.frame(U_est = simulation_results_U)
+
+
+#without coverage
+h_U <- ggplot(U_estimates, aes(x = U_est)) +
+  geom_histogram(binwidth = 0.002, fill = "blue", color = "black", alpha = 0.7) +
+  geom_vline(aes(xintercept = true_value), color = "red", linetype = "dashed", size = 1) +
+  labs(title = "Histogram of OS-estimates",
+       x = "OS-est",
+       y = "Frequency") +
+  theme_minimal()
+
+
+
+combined_hist <- h_OS / h_U
+combined_hist
+
+
+```
+
+
+
+
+
+
+
+
+
+
